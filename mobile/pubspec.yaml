@@ -1,0 +1,32 @@
+name: handwriting_app
+description: Offline handwriting-to-text capture with AI context correction.
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # image_picker drives both camera capture and gallery selection for the
+  # MVP. A dedicated `camera` package integration (live preview, framing
+  # guides for document edges) is a Phase 2 UX follow-up, not required for
+  # an end-to-end loop.
+  image_picker: ^1.1.2
+  google_mlkit_text_recognition: ^0.14.0
+  image: ^4.3.0
+  sqflite: ^2.4.1
+  path: ^1.9.0
+  path_provider: ^2.1.4
+  uuid: ^4.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/dictionaries/

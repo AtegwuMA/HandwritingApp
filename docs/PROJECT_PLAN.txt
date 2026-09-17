@@ -1,0 +1,179 @@
+HANDWRITING-TO-TEXT APP WITH AI CONTEXT CORRECTION
+====================================================
+
+1. WHAT WE'RE BUILDING
+-----------------------
+A mobile app that scans photographed (not stylus-captured) handwriting from
+any writer, converts it to text using an on-device handwriting recognition
+(HTR) model, then runs the raw output through an on-device AI correction
+model that uses surrounding sentence context to fix recognition errors. The
+whole pipeline must work fully offline. An optional cloud-enhanced mode can
+be added later for users who are online and want higher accuracy.
+
+Key constraint: this is general-purpose handwriting recognition, not tuned
+to one person's writing. Accuracy has to come from model quality and
+diverse training data, not per-user calibration.
+
+2. HIGH-LEVEL ARCHITECTURE
+---------------------------
+Two pipelines run in sequence on-device:
+
+  Camera/gallery image
+        |
+  Preprocessing (deskew, binarize, contrast)
+        |
+  HTR model (on-device inference)  ---->  raw text + per-token confidence
+        |
+  Fast pass: SymSpell / n-gram rescoring
+        |
+  Context correction model (on-device inference)
+        |
+  Final text  ---->  Review/edit UI  ---->  local storage
+
+Optional, phase 2+:
+
+  Final text  ---->  Spring Boot backend  ---->  Claude API (cloud correction)
+                                            ---->  Postgres (sync/history)
+
+3. WHERE PYTHON FITS (AND WHERE IT DOESN'T)
+--------------------------------------------
+Python is the right tool for training, fine-tuning, dataset work, model
+export, and evaluation. It is NOT the on-device runtime. Do not embed a
+Python interpreter in the mobile app (e.g. Chaquopy) for inference; it
+bloats the app and is slower than native inference engines.
+
+- Training/export/eval: Python (PyTorch, HuggingFace Transformers, ONNX
+  export tooling)
+- On-device inference: ONNX Runtime Mobile or TFLite, called from native
+  Android code
+- Optional cloud service: Python (FastAPI) is fine here if we want to
+  self-host an open model instead of only relying on Claude API, but this
+  is a later-phase decision, not required for MVP
+
+4. TECH STACK
+--------------
+Mobile app
+  Note: v1 uses Flutter (Dart) instead of native Kotlin, so the same
+  codebase can target iOS without a rewrite. Pipeline stages below are
+  unchanged; only the mobile implementation language differs.
+  - image_picker for camera/gallery capture
+  - `image` package for preprocessing (grayscale/contrast/binarize)
+  - ONNX Runtime Mobile (via Flutter bindings) for HTR and correction
+    model inference, once the custom models exist
+  - sqflite for local storage of scans, recognized text, and user edits
+
+ML training and tooling (Python)
+  - PyTorch + HuggingFace Transformers for HTR fine-tuning (TrOCR) and
+    correction model fine-tuning (T5-small or ByT5-small)
+  - Datasets: IAM Handwriting Database, RIMES, CVL, plus any
+    self-collected samples for style diversity
+  - Augraphy or Albumentations for realistic handwriting/document
+    augmentation
+  - ONNX export + onnxruntime-tools or optimum for quantization (INT8)
+
+Optional cloud layer (phase 2+)
+  - Spring Boot, PostgreSQL, Redis
+  - Claude API for cloud-enhanced correction
+  - Standard resilience patterns already in use on other projects:
+    idempotency keys, retry/backoff, correlation IDs on external calls
+
+5. REPOSITORY STRUCTURE
+------------------------
+  handwriting-app/
+    mobile/                 Flutter app
+      lib/
+      assets/models/        bundled quantized ONNX models
+    ml/                     Python: everything training/export/eval related
+      datasets/
+      htr_training/
+      correction_training/
+      export/               ONNX conversion + quantization scripts
+      eval/                 CER/WER benchmarking harness
+    backend/                Spring Boot cloud service (phase 2+)
+    docs/
+
+6. BUILD PHASES
+----------------
+Work through these in order. Each phase should produce something
+runnable/testable before moving on.
+
+Phase 0: Scaffolding
+  Set up the monorepo structure above, mobile app skeleton, Python
+  venv/requirements for ml/.
+
+Phase 1: Benchmarking harness (Python, before any app code)
+  Build an evaluation script in ml/eval/ that runs candidate HTR engines
+  (ML Kit baseline via a small Android test harness, plus off-the-shelf
+  TrOCR) against a sample set of diverse handwriting images and reports
+  character error rate (CER) and word error rate (WER). This decides
+  which HTR path we invest in.
+
+Phase 2: MVP app
+  Camera/gallery capture, ML Kit Text Recognition v2 as the initial HTR
+  engine, SymSpell as the initial correction pass, minimal review UI.
+  Goal: an end-to-end working loop, not accuracy.
+
+Phase 3: Custom HTR training (Python)
+  Fine-tune TrOCR on IAM + RIMES + CVL plus augmented data for style
+  diversity. Export to ONNX, quantize to INT8, verify size/latency budget
+  on a mid-tier device profile.
+
+Phase 4: On-device HTR integration
+  Integrate the custom ONNX model via ONNX Runtime Mobile. Consider
+  ensembling with ML Kit: run both, prefer the higher-confidence result,
+  or fall back to ML Kit when the custom model's confidence is low.
+
+Phase 5: Correction model training (Python)
+  Generate synthetic noisy-OCR-to-clean-text pairs using the actual error
+  patterns from the Phase 3/4 HTR model (not generic noise). Fine-tune
+  T5-small/ByT5-small on these pairs. If evaluation shows context
+  correction needs broader reasoning than T5-small provides, fall back to
+  a quantized small LLM (Phi-3-mini or Gemma 2B) via ONNX Runtime GenAI or
+  llama.cpp bindings.
+
+Phase 6: On-device correction integration
+  Wire SymSpell (fast pass) -> correction model (context pass) into the
+  pipeline. Measure end-to-end latency, not each model in isolation.
+
+Phase 7: Review/edit UI
+  Side-by-side view of original scan and recognized text, confidence
+  highlighting on low-confidence spans, easy manual correction. Log user
+  corrections locally (opt-in) for the active-learning loop in Phase 10.
+
+Phase 8: Offline hardening
+  Test cold start, memory, battery, and thermal behavior on a genuinely
+  low-spec device, not just a dev flagship. This determines whether the
+  LLM-based correction path is viable for the target device tier or
+  whether T5-small is the production choice.
+
+Phase 9 (optional): Cloud-enhanced mode
+  Spring Boot backend, Claude API for higher-accuracy correction when
+  online, Postgres for sync/history. Follow existing payment/external-API
+  resilience patterns (idempotency, retry, correlation IDs) even though
+  this isn't a payment flow, since the same reliability discipline
+  applies to AI generation calls.
+
+Phase 10 (optional): Active-learning feedback loop
+  Aggregate opted-in user corrections collected in Phase 7, periodically
+  retrain the correction model (and eventually the HTR model) in ml/ on
+  this real-world error data. This is what substitutes for per-user
+  personalization in a general-purpose product: the model improves in
+  aggregate across all users' real corrections over time.
+
+7. NON-FUNCTIONAL REQUIREMENTS
+-------------------------------
+- Fully functional with no network connection; cloud mode is additive,
+  never required
+- Define a minimum supported device tier early (this decides whether the
+  LLM correction path or the T5-small path is the production default)
+- App size budget should be set explicitly before Phase 3, since
+  quantized HTR + correction models both compete for the same budget
+- Track CER/WER as the primary accuracy metrics throughout, not
+  subjective spot checks
+
+8. OPEN DECISIONS TO REVISIT DURING IMPLEMENTATION
+---------------------------------------------------
+- T5-small vs quantized small LLM as the production correction model,
+  decided by Phase 8 device testing, not upfront
+- Whether to self-host an open correction model in the cloud layer or
+  rely solely on Claude API for the cloud-enhanced mode

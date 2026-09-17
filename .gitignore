@@ -1,0 +1,18 @@
+# Python (ml/)
+ml/.venv/
+ml/**/__pycache__/
+ml/datasets/**
+!ml/datasets/README.md
+*.pyc
+
+# Flutter (mobile/) — see mobile/.gitignore for app-specific ignores
+mobile/.dart_tool/
+mobile/build/
+
+# Bundled models are large binaries; track via a model-registry step later
+mobile/assets/models/*
+!mobile/assets/models/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
